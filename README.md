@@ -16,7 +16,7 @@ That's it. The script will:
 - Install Wine and dependencies
 - Set up a dedicated Wine prefix
 - Install WebView2 runtime
-- Apply DXVK (fixes WebView2 blinking/rendering issues)
+- Apply DXVK (improves rendering performance)
 - Download and install Growtopia
 - Create a `growtopia` launcher command + desktop entry
 
@@ -94,7 +94,7 @@ Or find it in your application menu.
 
 ## 🐛 Known Issues
 
-**WebView2 login screen blinking** — Fixed by DXVK. The script installs it automatically.
+**WebView2 login screen blinking** — This is a known limitation of Wine. The login screen (WebView2) will flicker/blink until you interact with it (click or type). This is caused by Wine's incomplete implementation of DirectComposition (`DCompositionCreateDevice3`), which is an open bug in WineHQ. The game itself works fine after login — only the login screen is affected. There is currently no fix for this.
 
 **WebView2 fails to download during install** — Make sure `lib32-gnutls` (Arch) or `libgnutls30:i386` (Ubuntu) is installed.
 

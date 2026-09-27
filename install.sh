@@ -109,29 +109,35 @@ install_deps_arch() {
 
     run_silent "sudo pacman -Sy --noconfirm" "Syncing package database"
 
-    # wine-staging check — avoid conflict
-    local wine_pkg="wine"
-    if pacman -Qq wine-staging &>/dev/null; then
-        warn "wine-staging detected — skipping wine to avoid conflict"
-        wine_pkg=""
+    # Detect wine conflict BEFORE spawning subshell
+    local has_staging=0
+    pacman -Qq wine-staging &>/dev/null && has_staging=1
+
+    if [[ $has_staging -eq 1 ]]; then
+        warn "wine-staging detected — using it instead of wine (conflict avoided)"
+        run_silent "sudo pacman -S --noconfirm --needed wine-staging wine-mono winetricks lib32-gnutls" "Installing Wine & dependencies"
+    else
+        run_silent "sudo pacman -S --noconfirm --needed wine wine-mono winetricks lib32-gnutls" "Installing Wine & dependencies"
     fi
-
-    local pkgs="wine-mono winetricks lib32-gnutls"
-    [[ -n "$wine_pkg" ]] && pkgs="wine $pkgs"
-
-    run_silent "sudo pacman -S --noconfirm --needed $pkgs" "Installing Wine & dependencies"
 
     # AUR helper check for DXVK
     if ! command -v yay &>/dev/null && ! command -v paru &>/dev/null; then
         warn "No AUR helper found. Installing yay..."
         run_silent "sudo pacman -S --noconfirm --needed git base-devel" "Installing build tools"
-        run_silent "git clone https://aur.archlinux.org/yay-bin.git /tmp/yay-bin && cd /tmp/yay-bin && makepkg -si --noconfirm" "Building yay"
+        (
+            git clone https://aur.archlinux.org/yay-bin.git /tmp/yay-bin >> "$LOG_FILE" 2>&1
+            cd /tmp/yay-bin
+            makepkg -si --noconfirm >> "$LOG_FILE" 2>&1
+        )
+        spinner_stop ok "Building yay"
     fi
 
     if command -v yay &>/dev/null; then
         run_silent "yay -S --noconfirm dxvk-bin" "Installing DXVK (yay)"
     elif command -v paru &>/dev/null; then
         run_silent "paru -S --noconfirm dxvk-bin" "Installing DXVK (paru)"
+    else
+        warn "No AUR helper available, skipping DXVK"
     fi
 }
 

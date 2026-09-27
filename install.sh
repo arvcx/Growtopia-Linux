@@ -1,20 +1,97 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-WINEPREFIX="$HOME/.wine-growtopia"
+# ─────────────────────────────────────────────
+#  Growtopia Linux Installer
+#  github.com/arvcx/growtopia-linux
+# ─────────────────────────────────────────────
+
+WINEPREFIX="${WINEPREFIX:-$HOME/.wine-growtopia}"
 GROWTOPIA_EXE="$WINEPREFIX/drive_c/users/$USER/AppData/Local/Growtopia/Growtopia.exe"
+LOG_FILE="/tmp/growtopia-install.log"
+VERSION="1.0.0"
 
+# ── Colors ────────────────────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[2m'
 NC='\033[0m'
 
-info()    { echo -e "${GREEN}[INFO]${NC} $1"; }
-warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
-error()   { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+# ── Logging ───────────────────────────────────
+info()    { echo -e "${GREEN}  ✔${NC}  $1"; }
+warn()    { echo -e "${YELLOW}  ⚠${NC}  $1"; }
+error()   { echo -e "${RED}  ✖${NC}  $1" >&2; exit 1; }
+step()    { echo -e "\n${BOLD}${CYAN}▶ $1${NC}"; }
+log()     { echo "[$(date '+%H:%M:%S')] $*" >> "$LOG_FILE"; }
 
+# ── Spinner ───────────────────────────────────
+_SPINNER_PID=""
+
+spinner_start() {
+    local msg="$1"
+    local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+    local i=0
+    (
+        while true; do
+            printf "\r${CYAN}  ${frames[$i]}${NC}  %s" "$msg"
+            i=$(( (i + 1) % ${#frames[@]} ))
+            sleep 0.08
+        done
+    ) &
+    _SPINNER_PID=$!
+    disown "$_SPINNER_PID" 2>/dev/null || true
+}
+
+spinner_stop() {
+    local status="${1:-ok}"
+    if [[ -n "$_SPINNER_PID" ]] && kill -0 "$_SPINNER_PID" 2>/dev/null; then
+        kill "$_SPINNER_PID" 2>/dev/null
+        wait "$_SPINNER_PID" 2>/dev/null || true
+        _SPINNER_PID=""
+    fi
+    if [[ "$status" == "ok" ]]; then
+        printf "\r${GREEN}  ✔${NC}  %-50s\n" "$2"
+    else
+        printf "\r${RED}  ✖${NC}  %-50s\n" "$2"
+    fi
+}
+
+# run_silent CMD MSG — runs CMD silently with spinner, logs output
+run_silent() {
+    local cmd="$1"
+    local msg="$2"
+    spinner_start "$msg"
+    if eval "$cmd" >> "$LOG_FILE" 2>&1; then
+        spinner_stop ok "$msg"
+    else
+        spinner_stop fail "$msg"
+        echo -e "${DIM}  See log: $LOG_FILE${NC}"
+        exit 1
+    fi
+}
+
+# ── Banner ────────────────────────────────────
+print_banner() {
+    echo -e "${CYAN}"
+    cat << 'EOF'
+  ██████╗ ██████╗  ██████╗ ██╗    ██╗████████╗ ██████╗ ██████╗ ██╗ █████╗ 
+ ██╔════╝ ██╔══██╗██╔═══██╗██║    ██║╚══██╔══╝██╔═══██╗██╔══██╗██║██╔══██╗
+ ██║  ███╗██████╔╝██║   ██║██║ █╗ ██║   ██║   ██║   ██║██████╔╝██║███████║
+ ██║   ██║██╔══██╗██║   ██║██║███╗██║   ██║   ██║   ██║██╔═══╝ ██║██╔══██║
+ ╚██████╔╝██║  ██║╚██████╔╝╚███╔███╔╝   ██║   ╚██████╔╝██║     ██║██║  ██║
+  ╚═════╝ ╚═╝  ╚═╝ ╚═════╝  ╚══╝╚══╝    ╚═╝    ╚═════╝ ╚═╝     ╚═╝╚═╝  ╚═╝
+EOF
+    echo -e "${NC}"
+    echo -e "${DIM}         Growtopia Linux Installer v${VERSION} — github.com/arvcx/growtopia-linux${NC}"
+    echo ""
+}
+
+# ── Distro Detection ──────────────────────────
 detect_distro() {
-    if [ -f /etc/os-release ]; then
+    if [[ -f /etc/os-release ]]; then
         . /etc/os-release
         echo "$ID"
     else
@@ -22,159 +99,213 @@ detect_distro() {
     fi
 }
 
+# ── Arch / Manjaro / EndeavourOS ──────────────
 install_deps_arch() {
-    info "Detected Arch Linux"
-
-    # Enable multilib if not already enabled
+    # Enable multilib if missing
     if ! grep -q "^\[multilib\]" /etc/pacman.conf; then
         warn "Enabling multilib repository..."
         sudo sed -i '/^#\[multilib\]/,/^#Include/ s/^#//' /etc/pacman.conf
     fi
 
-    info "Syncing package database..."
-    sudo pacman -Sy --noconfirm
+    run_silent "sudo pacman -Sy --noconfirm" "Syncing package database"
 
-    info "Installing Wine, winetricks, and dependencies..."
-    sudo pacman -S --noconfirm --needed wine wine-mono winetricks lib32-gnutls
+    # wine-staging check — avoid conflict
+    local wine_pkg="wine"
+    if pacman -Qq wine-staging &>/dev/null; then
+        warn "wine-staging detected — skipping wine to avoid conflict"
+        wine_pkg=""
+    fi
 
-    info "Installing DXVK..."
+    local pkgs="wine-mono winetricks lib32-gnutls"
+    [[ -n "$wine_pkg" ]] && pkgs="wine $pkgs"
+
+    run_silent "sudo pacman -S --noconfirm --needed $pkgs" "Installing Wine & dependencies"
+
+    # AUR helper check for DXVK
     if ! command -v yay &>/dev/null && ! command -v paru &>/dev/null; then
         warn "No AUR helper found. Installing yay..."
-        sudo pacman -S --noconfirm --needed git base-devel
-        git clone https://aur.archlinux.org/yay-bin.git /tmp/yay-bin
-        cd /tmp/yay-bin && makepkg -si --noconfirm
-        cd -
+        run_silent "sudo pacman -S --noconfirm --needed git base-devel" "Installing build tools"
+        run_silent "git clone https://aur.archlinux.org/yay-bin.git /tmp/yay-bin && cd /tmp/yay-bin && makepkg -si --noconfirm" "Building yay"
     fi
 
     if command -v yay &>/dev/null; then
-        yay -S --noconfirm dxvk-bin
+        run_silent "yay -S --noconfirm dxvk-bin" "Installing DXVK (yay)"
     elif command -v paru &>/dev/null; then
-        paru -S --noconfirm dxvk-bin
+        run_silent "paru -S --noconfirm dxvk-bin" "Installing DXVK (paru)"
     fi
 }
 
+# ── Ubuntu / Debian ───────────────────────────
 install_deps_ubuntu() {
-    info "Detected Ubuntu/Debian"
+    run_silent "sudo dpkg --add-architecture i386" "Enabling 32-bit architecture"
+    run_silent "sudo mkdir -pm755 /etc/apt/keyrings && sudo wget -q -O /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key" "Adding WineHQ GPG key"
 
-    info "Enabling 32-bit architecture..."
-    sudo dpkg --add-architecture i386
-
-    info "Adding Wine repository..."
-    sudo mkdir -pm755 /etc/apt/keyrings
-    sudo wget -O /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key
     . /etc/os-release
-    sudo wget -NP /etc/apt/sources.list.d/ "https://dl.winehq.org/wine-builds/ubuntu/dists/${UBUNTU_CODENAME}/winehq-stable.sources"
-
-    info "Updating package list..."
-    sudo apt update -y
-
-    info "Installing Wine, winetricks, and dependencies..."
-    sudo apt install -y --install-recommends winehq-stable winetricks libgnutls30:i386
-
-    info "Installing DXVK..."
-    sudo apt install -y dxvk || warn "DXVK not found in apt, skipping. You can install it manually."
+    run_silent "sudo wget -qNP /etc/apt/sources.list.d/ 'https://dl.winehq.org/wine-builds/ubuntu/dists/${UBUNTU_CODENAME}/winehq-stable.sources'" "Adding WineHQ repository"
+    run_silent "sudo apt update -y" "Updating package list"
+    run_silent "sudo apt install -y --install-recommends winehq-stable winetricks libgnutls30:i386" "Installing Wine & dependencies"
+    run_silent "sudo apt install -y dxvk" "Installing DXVK" || warn "DXVK not found in apt, skipping."
 }
 
+# ── Fedora ────────────────────────────────────
 install_deps_fedora() {
-    info "Detected Fedora"
-
-    info "Installing Wine and dependencies..."
-    sudo dnf install -y wine winetricks gnutls.i686
-
-    info "Installing DXVK..."
-    sudo dnf install -y dxvk || warn "DXVK not available, skipping."
+    run_silent "sudo dnf install -y wine winetricks gnutls.i686" "Installing Wine & dependencies"
+    run_silent "sudo dnf install -y dxvk" "Installing DXVK" || warn "DXVK not available, skipping."
 }
 
+# ── Wine Prefix Setup ─────────────────────────
 setup_wineprefix() {
-    info "Setting up Wine prefix at $WINEPREFIX..."
     export WINEPREFIX
     export WINEARCH=win64
-    wineboot --init 2>/dev/null
 
-    info "Applying WebView2 fix..."
-    wine reg add "HKEY_CURRENT_USER\Software\Wine\AppDefaults\msedgewebview2.exe" \
-        /v Version /t REG_SZ /d win8 /f 2>/dev/null
+    run_silent "wineboot --init" "Initializing Wine prefix"
 
-    info "Installing WebView2 runtime..."
-    TMP_WV2="/tmp/MicrosoftEdgeWebview2Setup.exe"
-    curl -L "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -o "$TMP_WV2"
-    wine "$TMP_WV2" 2>/dev/null
+    run_silent "wine reg add 'HKEY_CURRENT_USER\\Software\\Wine\\AppDefaults\\msedgewebview2.exe' /v Version /t REG_SZ /d win8 /f" "Applying WebView2 registry fix"
 
-    info "Applying DXVK..."
+    local tmp_wv2="/tmp/MicrosoftEdgeWebview2Setup.exe"
+    run_silent "curl -fsSL 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -o '$tmp_wv2'" "Downloading WebView2 runtime"
+    run_silent "wine '$tmp_wv2'" "Installing WebView2 runtime"
+
     if command -v setup_dxvk &>/dev/null; then
-        setup_dxvk install 2>/dev/null
+        run_silent "setup_dxvk install" "Applying DXVK to prefix"
     else
-        warn "setup_dxvk not found, skipping DXVK setup."
+        warn "setup_dxvk not found, skipping DXVK prefix setup."
     fi
+}
+
+# ── Growtopia Install / Update ────────────────
+download_and_run_installer() {
+    local tmp_gt="/tmp/Growtopia-Installer.exe"
+    run_silent "curl -fsSL 'https://growtopiagame.com/Growtopia-Installer.exe' -o '$tmp_gt'" "Downloading Growtopia installer"
+    run_silent "WINEPREFIX='$WINEPREFIX' wine '$tmp_gt'" "Running Growtopia installer"
 }
 
 install_growtopia() {
-    info "Downloading Growtopia installer..."
-    TMP_GT="/tmp/Growtopia-Installer.exe"
-    curl -L "https://growtopiagame.com/Growtopia-Installer.exe" -o "$TMP_GT"
-
-    info "Running Growtopia installer..."
-    WINEPREFIX="$WINEPREFIX" wine "$TMP_GT" 2>/dev/null
+    download_and_run_installer
 }
 
-create_launcher() {
-    LAUNCHER="$HOME/.local/bin/growtopia"
-    mkdir -p "$HOME/.local/bin"
+update_growtopia() {
+    if [[ ! -f "$GROWTOPIA_EXE" ]]; then
+        error "Growtopia is not installed. Run the installer first (without --update)."
+    fi
+    info "Found existing installation at: $GROWTOPIA_EXE"
+    download_and_run_installer
+}
 
-    cat > "$LAUNCHER" <<EOF
+# ── Launcher & Desktop Entry ──────────────────
+create_launcher() {
+    local launcher="$HOME/.local/bin/growtopia"
+    local desktop="$HOME/.local/share/applications/growtopia.desktop"
+
+    mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications"
+
+    cat > "$launcher" << EOF
 #!/bin/bash
 export WINEPREFIX="$WINEPREFIX"
 exec wine "$GROWTOPIA_EXE" "\$@"
 EOF
-    chmod +x "$LAUNCHER"
+    chmod +x "$launcher"
 
-    # Desktop entry
-    DESKTOP="$HOME/.local/share/applications/growtopia.desktop"
-    mkdir -p "$HOME/.local/share/applications"
-    cat > "$DESKTOP" <<EOF
+    cat > "$desktop" << EOF
 [Desktop Entry]
 Name=Growtopia
-Exec=$LAUNCHER
+Comment=Play Growtopia via Wine
+Exec=$launcher
+Terminal=false
 Type=Application
 Categories=Game;
 EOF
 
-    info "Launcher created at $LAUNCHER"
-    info "You can now run Growtopia by typing: growtopia"
-    info "Or find it in your application menu."
+    # Ensure ~/.local/bin is in PATH
+    if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+        warn "~/.local/bin is not in PATH. Add this to your shell profile:"
+        echo -e "    ${DIM}export PATH=\"\$HOME/.local/bin:\$PATH\"${NC}"
+    fi
+
+    info "Launcher created at $launcher"
+    info "Desktop entry created at $desktop"
 }
 
+# ── Usage ─────────────────────────────────────
+print_usage() {
+    echo -e "Usage: $0 [OPTIONS]"
+    echo ""
+    echo -e "  ${BOLD}(no args)${NC}     Fresh install Growtopia"
+    echo -e "  ${BOLD}--update${NC}      Re-download installer and update Growtopia"
+    echo -e "  ${BOLD}--prefix PATH${NC} Custom Wine prefix path (default: ~/.wine-growtopia)"
+    echo -e "  ${BOLD}--help${NC}        Show this help"
+    echo ""
+}
+
+# ── Summary Box ───────────────────────────────
+print_summary() {
+    local mode="$1"
+    echo ""
+    echo -e "${CYAN}┌──────────────────────────────────────────────┐${NC}"
+    if [[ "$mode" == "update" ]]; then
+        echo -e "${CYAN}│${NC}  ${GREEN}${BOLD}Growtopia updated successfully!${NC}               ${CYAN}│${NC}"
+    else
+        echo -e "${CYAN}│${NC}  ${GREEN}${BOLD}Growtopia installed successfully!${NC}             ${CYAN}│${NC}"
+    fi
+    echo -e "${CYAN}├──────────────────────────────────────────────┤${NC}"
+    echo -e "${CYAN}│${NC}  Run:    ${BOLD}growtopia${NC}                            ${CYAN}│${NC}"
+    echo -e "${CYAN}│${NC}  Update: ${BOLD}bash install.sh --update${NC}             ${CYAN}│${NC}"
+    echo -e "${CYAN}│${NC}  Log:    ${DIM}$LOG_FILE${NC}        ${CYAN}│${NC}"
+    echo -e "${CYAN}└──────────────────────────────────────────────┘${NC}"
+    echo ""
+}
+
+# ── Main ──────────────────────────────────────
 main() {
-    echo ""
-    echo "  ██████╗ ██████╗  ██████╗ ██╗    ██╗████████╗ ██████╗ ██████╗ ██╗ █████╗ "
-    echo " ██╔════╝ ██╔══██╗██╔═══██╗██║    ██║╚══██╔══╝██╔═══██╗██╔══██╗██║██╔══██╗"
-    echo " ██║  ███╗██████╔╝██║   ██║██║ █╗ ██║   ██║   ██║   ██║██████╔╝██║███████║"
-    echo " ██║   ██║██╔══██╗██║   ██║██║███╗██║   ██║   ██║   ██║██╔═══╝ ██║██╔══██║"
-    echo " ╚██████╔╝██║  ██║╚██████╔╝╚███╔███╔╝   ██║   ╚██████╔╝██║     ██║██║  ██║"
-    echo "  ╚═════╝ ╚═╝  ╚═╝ ╚═════╝  ╚══╝╚══╝    ╚═╝    ╚═════╝ ╚═╝     ╚═╝╚═╝  ╚═╝"
-    echo ""
-    echo "           Growtopia Linux Installer — github.com/arvcx/growtopia-linux"
-    echo ""
+    print_banner
 
-    DISTRO=$(detect_distro)
+    # Init log
+    echo "=== Growtopia Linux Installer - $(date) ===" > "$LOG_FILE"
 
-    case "$DISTRO" in
-        arch|manjaro|endeavouros)   install_deps_arch ;;
-        ubuntu|debian|linuxmint|pop) install_deps_ubuntu ;;
-        fedora)                      install_deps_fedora ;;
+    # Parse args
+    local mode="install"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --update)  mode="update" ;;
+            --prefix)  shift; WINEPREFIX="$1"; GROWTOPIA_EXE="$WINEPREFIX/drive_c/users/$USER/AppData/Local/Growtopia/Growtopia.exe" ;;
+            --help|-h) print_usage; exit 0 ;;
+            *) warn "Unknown option: $1"; print_usage; exit 1 ;;
+        esac
+        shift
+    done
+
+    if [[ "$mode" == "update" ]]; then
+        step "Updating Growtopia"
+        update_growtopia
+        print_summary update
+        exit 0
+    fi
+
+    # ── Fresh Install ──
+    local distro
+    distro=$(detect_distro)
+
+    step "Installing system dependencies"
+    case "$distro" in
+        arch|manjaro|endeavouros|cachyos)   install_deps_arch ;;
+        ubuntu|debian|linuxmint|pop)        install_deps_ubuntu ;;
+        fedora)                             install_deps_fedora ;;
         *)
-            warn "Distro '$DISTRO' not officially supported. Trying Arch method..."
+            warn "Distro '$distro' not officially supported. Trying Arch method..."
             install_deps_arch
             ;;
     esac
 
+    step "Setting up Wine prefix"
     setup_wineprefix
+
+    step "Installing Growtopia"
     install_growtopia
+
+    step "Creating launcher"
     create_launcher
 
-    echo ""
-    info "Installation complete! Run: growtopia"
-    echo ""
+    print_summary install
 }
 
-main
+main "$@"
